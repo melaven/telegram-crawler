@@ -1,164 +1,137 @@
-# Telegram Freelance Lead Bot
+# Telegram Ingestion Engine | B2B SI & Mention Discovery
 
-An opt-in Telegram collector and PostgreSQL-backed lead pipeline for a single operator or a small controlled deployment.
+[![Python 3.14.7](https://img.shields.io/badge/Python-3.14.7-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Telethon](https://img.shields.io/badge/Telegram-Telethon-2CA5E0?logo=telegram&logoColor=white)](https://docs.telethon.dev/)
+[![PostgreSQL](https://img.shields.io/badge/Storage-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![AsyncIO](https://img.shields.io/badge/Runtime-AsyncIO-4C8BF5?logo=python&logoColor=white)](https://docs.python.org/3/library/asyncio.html)
+[![Docker Compose](https://img.shields.io/badge/Local%20services-Docker%20Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
-This repository is published as an engineering baseline, not as a hosted service. It does not include Telegram sessions, database dumps, API keys, captured messages, or production-quality guarantees.
+🇬🇧 **English** | 🇷🇺 [Русский](README.ru.md) | 🇩🇪 [Deutsch](README.de.md) | 🇫🇷 [Français](README.fr.md) | 🇨🇳 [简体中文](README.zh-CN.md)
 
-## Safety first
+> **Implementation note:** Despite the requested SI-oriented positioning, this repository currently implements a Telegram freelance-lead bot and a PostgreSQL-backed source-discovery and ingestion pipeline. It is not a general-purpose brand-sentiment monitoring platform. This README describes the checked-in implementation rather than planned or aspirational architecture.
 
-The default command is intentionally non-operational:
+The application collects posts from operator-approved Telegram sources, stores them with durable processing jobs, filters and optionally analyzes potential freelance opportunities, and can deliver eligible matches through a Telegram bot. Source discovery and audit are explicit operator capabilities; they are not an always-on crawler.
 
-```bash
-uv run --frozen python -m freelancer_bot
+## Architecture
+
+```mermaid
+flowchart LR
+    Operator["Operator-approved sources"] --> Collector["Telethon user collector"]
+    Discovery["Optional bounded source discovery"] --> Audit["Source audit & lifecycle approval"]
+    Audit --> Catalog["PostgreSQL source catalog"]
+    Catalog --> Collector
+    Collector --> Governor["PostgreSQL-backed request governor"]
+    Governor --> Raw["PostgreSQL raw messages<br/>unique source/message key"]
+    Raw --> Jobs["Durable PostgreSQL jobs"]
+    Jobs --> Prefilter["Deterministic prefilter & dedup"]
+    Prefilter --> Analyzer["Optional BYOK opportunity analyzer"]
+    Analyzer --> Opportunities["Canonical Opportunities"]
+    Opportunities --> Matching["Profile matching & entitlement checks"]
+    Matching --> Delivery["Telegram bot delivery"]
 ```
 
-It prints help and exits. It does not connect to Telegram, PostgreSQL, OpenAI, DeepSeek, Web Search, or start workers. Network and paid work require an explicit mode.
+The runtime uses PostgreSQL for the source catalog, raw-message persistence, durable jobs, request-governor state, matching, and delivery records. Redis, FastAPI, and Pyrogram are not part of the current application architecture. Docker Compose provides local PostgreSQL and optional SearXNG services; it does not containerize the application.
 
-The supported modes are:
+## Engineering highlights
 
-```bash
-# User-facing Telegram UI only. No user collector, catch-up, discovery,
-# matching worker, or delivery worker is started.
-uv run --frozen python -m freelancer_bot --bot-only
+- **Controlled source lifecycle:** candidates are persisted with provenance, checked for collector access, audited against bounded evidence requirements, and explicitly approved before entering the runtime catalog.
+- **Telegram request governance:** Telethon operations are paced and coordinated through a PostgreSQL-backed per-collector gate. FloodWait state is persisted, and the original Telethon error is surfaced.
+- **Durable asynchronous processing:** raw-message and downstream work use PostgreSQL-backed durable jobs with leases, retries, and stale-lease reclamation.
+- **Idempotent ingestion and exact-content handling:** database uniqueness prevents duplicate source/message records; later prefiltering routes exact duplicates through a persisted deduplication flow.
+- **Optional analysis with cost controls:** AI is bring-your-own-key (BYOK), provider-neutral, budget guarded, and disabled or unavailable unless explicitly configured.
+- **Explicit operational modes:** the default command prints help and exits; collection, discovery, and delivery require explicit modes and configuration.
 
-# Full collector + durable pipeline + matching/delivery runtime.
-uv run --frozen python -m freelancer_bot --run
+## Privacy, compliance & responsible use
 
-# Authenticated user collector and source-discovery runtime only.
-uv run --frozen python -m freelancer_bot --collector-only
-```
+This software is intended for lawful, operator-controlled monitoring of sources the operator is authorized to access. Configure a bounded source catalog and follow applicable platform terms, privacy requirements, and retention policies. Public visibility alone does not establish a legal basis for collection or processing.
 
-Use `--run` only after reviewing the source catalog, session permissions, catch-up settings, AI budget, and delivery recipient. Keep `SEND_CATCH_UP=false` and `SOURCE_DISCOVERY_ENABLED=false` for an initial setup.
+The implementation does **not** guarantee deterministic PII removal before database storage or before optional analysis:
 
-## What the system contains
+- Raw Telegram message content is stored in PostgreSQL for the processing pipeline.
+- If an analyzer is configured and enabled, relevant message content may be sent to that provider; review the provider and data-handling terms before enabling it.
+- Structured observability redacts message-content fields and configured secrets from logs. Log redaction is not the same as sanitizing stored messages.
+- Source lifecycle controls and access checks do not replace a legal review, a retention policy, or operator authorization.
 
-- A Telethon user session reads approved Telegram sources that the account can access.
-- A separate Telethon bot session serves the user-facing UI and sends cards.
-- PostgreSQL is the source of truth for V2 users, profiles, raw messages, durable jobs, Opportunities, matching, deliveries, feedback, sources, and billing evidence.
-- SQLite is legacy V1 storage only. It is not used as V2 storage and is not required by `--bot-only`.
-- The durable worker prefilters raw messages, optionally analyzes them with a configured AI provider, materializes canonical Opportunities, evaluates matches, and schedules personalized deliveries.
-- Source discovery and audit are explicit, bounded operator capabilities. They are disabled by default in the public example configuration.
+Do not use this project to collect private correspondence, access restricted sources without permission, or conduct unsolicited mass outreach. Keep Telegram sessions and API credentials out of Git, restrict database access, and test with a small approved source set before enabling live collection. See [SECURITY.md](SECURITY.md) and [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
 
-Stable core: PostgreSQL migrations/repositories, durable jobs, deterministic filtering/matching, profile confirmation, delivery idempotency, redacted structured logs, and provider-neutral boundaries.
+## Technology
 
-Experimental or operationally sensitive: live Telegram collection, Web/Brave/SearXNG discovery, Telegram global/chat discovery, Source Audit, OpenAI-compatible onboarding providers other than OpenAI, and payment-provider adapters. These require explicit configuration and real-world verification.
+- **Language/runtime:** Python 3.14.7, `asyncio`
+- **Telegram:** Telethon user and bot clients
+- **Persistence and jobs:** PostgreSQL 18, SQLAlchemy asyncio, psycopg, Alembic
+- **Optional discovery:** SearXNG and configured web providers
+- **Optional analysis:** configured OpenAI-compatible providers, BYOK
+- **Local dependencies:** Docker Compose for PostgreSQL and optional SearXNG
 
 ## Requirements
 
 - Python 3.14.7 (pinned in `.python-version`)
 - uv 0.12.2 (pinned in `pyproject.toml` and CI)
-- PostgreSQL 18.x for V2
-- Telegram API ID/hash and a user session for collection
-- A Telegram bot token for `--bot-only` or `--run`
-- An OpenAI-compatible key only for AI features; AI is BYOK and optional
+- PostgreSQL 18.x
+- Telegram API credentials; a user session for collection
+- A Telegram bot token for bot UI or delivery
+- Provider credentials only for explicitly enabled optional features
 
-## Setup
+## Quick start
 
 ```bash
-git clone https://github.com/Egor01KKK/telegram-freelance-lead-bot.git
-cd telegram-freelance-lead-bot
 uv python install 3.14.7
 uv sync --locked
 cp .env.example .env
 docker compose up -d postgres
 uv run --frozen alembic upgrade head
-uv run --frozen python -m freelancer_bot.persistence.source_seed \
-  --sources-json config/sources.json
+uv run --frozen python -m freelancer_bot.persistence.source_seed --sources-json config/sources.json
 uv run --frozen python -m freelancer_bot --check-config
 ```
 
-Fill `.env` locally. Never commit it. Use a fresh Telegram user session path and a separate bot session path; never run two processes against the same Telethon session file.
+Set local values in `.env`; never commit it. Use separate Telethon session paths for each process/account. The application does not create or alter the PostgreSQL schema at startup; apply migrations first. `DATABASE_URL` must use the `postgresql+psycopg://` scheme.
 
-Minimum values for V2 UI:
+## Runtime modes
 
-```dotenv
-TELEGRAM_API_ID=...
-TELEGRAM_API_HASH=...
-TELEGRAM_BOT_TOKEN=...
-DATABASE_URL=<your-postgresql-dsn>
+The no-argument command is safe and non-operational:
+
+```bash
+uv run --frozen python -m freelancer_bot
 ```
 
-`DATABASE_URL` must use the `postgresql+psycopg://` scheme. The production application does not create or alter PostgreSQL schema at startup; run Alembic first.
+It prints help and exits without connecting to Telegram, PostgreSQL, or external providers. Start a specific mode only after reviewing the source catalog and configuration:
 
-## Configuration by mode
+```bash
+# Bot UI only; does not start the user collector or ingestion workers.
+uv run --frozen python -m freelancer_bot --bot-only
 
-| Mode | Required | External work |
-| --- | --- | --- |
-| `--check-config`, `--check-filter` | no credentials | local file validation only |
-| `--bot-only` | Telegram API ID/hash, bot token, PostgreSQL | bot UI; user text may invoke one configured onboarding AI call |
-| `--collector-only` | Telegram API ID/hash, PostgreSQL, user session | user-session catalog/collection; discovery only when explicitly enabled |
-| `--run` | Telegram API ID/hash, bot token, PostgreSQL, user session | collector, durable workers, matching/delivery; catch-up/discovery/AI remain separately configured |
-| `--check-sources` | Telegram API ID/hash, user session | bounded Telegram entity checks |
+# Authenticated user collector and source-discovery runtime.
+uv run --frozen python -m freelancer_bot --collector-only
 
-`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `TOKENROUTER_API_KEY`, and `BRAVE_SEARCH_API_KEY` are never required for a fresh clone. Missing AI keys fail closed for the corresponding feature. Missing Web providers produce an unavailable/skip outcome; they do not cause a retry storm.
+# Full collector, durable pipeline, matching, and delivery runtime.
+uv run --frozen python -m freelancer_bot --run
+```
+
+For an initial setup, keep `SEND_CATCH_UP=false` and `SOURCE_DISCOVERY_ENABLED=false`. Consult [docs/COST_SAFETY.md](docs/COST_SAFETY.md) before enabling provider-backed work.
 
 ## Operator commands
 
-All commands below are explicit and PostgreSQL-backed. They emit body-free or bounded operational data where the command supports it; do not paste private message contents into issue reports.
+These commands inspect and administer the PostgreSQL-backed source and processing pipeline:
 
 ```bash
-# Source catalog and auditable lifecycle transitions
+# Source catalog and audit records
 uv run --frozen python -m freelancer_bot.operator_cli sources list --limit 100
 uv run --frozen python -m freelancer_bot.operator_cli sources audits --limit 100
+
+# Explicit source lifecycle transition with actor and reason
 uv run --frozen python -m freelancer_bot.operator_cli sources transition \
   --source-id 123 --target paused --actor operator --reason "manual review"
 
-# Web/Telegram discovery and durable run inspection
+# Discovery, source audit, matching, and delivery inspection
 uv run --frozen python -m freelancer_bot.operator_cli discovery runs --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli discovery results --run-id UUID
-uv run --frozen python -m freelancer_bot.operator_cli discovery graph \
-  --run-key graph-canary-1 --seed-source-id 123 \
-  --message-limit-per-seed 25 --max-candidates 5 --max-observations 100
-uv run --frozen python -m freelancer_bot.operator_cli discovery web \
-  --searxng-url http://127.0.0.1:8080 --run-key web-canary-1
-
-# Source Audit (requires an authenticated collector, OpenAI key, and access)
 uv run --frozen python -m freelancer_bot.operator_cli audit list --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli audit run --source-id 123
-
-# Matching, delivery, and body-free product observations
 uv run --frozen python -m freelancer_bot.operator_cli match runs --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli match traces --limit 100
 uv run --frozen python -m freelancer_bot.operator_cli delivery list --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli observe raw --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli observe opportunities --limit 100
-uv run --frozen python -m freelancer_bot.operator_cli observe metrics \
-  --since 2026-01-01T00:00:00+00:00 --until 2026-01-02T00:00:00+00:00
 ```
 
-Discovery and audit never approve a source by bypassing the lifecycle. Use the repository command to record an actor and reason. Public sources can be inspected by an authenticated collector; private sources still require explicit per-account access.
+Discovery and audit do not bypass the source lifecycle or automatically approve candidates. Review [docs/COST_SAFETY.md](docs/COST_SAFETY.md) before running provider-backed discovery or analysis.
 
-## AI and cost controls
-
-The public defaults are deliberately conservative:
-
-- AI reply generation is off.
-- Opportunity fallback is off because it can multiply calls.
-- Per-onboarding analyzer budget defaults to 10 calls per process.
-- Opportunity analysis has default daily/monthly spend limits of USD 1/10, with reserves for in-flight calls.
-- Structured-output retries are bounded by configuration.
-- CI contains no provider credentials and makes no provider calls.
-
-Bring your own key and set a budget appropriate for your account before enabling AI. Free or experimental providers are not treated as production-compatible merely because their endpoint accepts an OpenAI-shaped request. Provider selection must remain isolated and failures must fail closed.
-
-## Telegram sessions and privacy
-
-Telethon user sessions are bearer credentials. Store them outside Git, use separate paths per process/account, and revoke a session in Telegram Settings → Devices if it is exposed. The bot token, API hash, database DSN, provider keys, cookies, phone numbers, access hashes, message bodies, and private source identities must never be pasted into a public issue or chat.
-
-Structured logs redact configured secrets, DSNs, authorization values, Telegram bot tokens, and AI keys. Message content fields are redacted. Logs and operator exports are local-only and ignored by Git.
-
-## Known limitations
-
-This project is not a hosted, turnkey marketplace. See [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) for the product audit. Important limitations include:
-
-- useful results depend on an active confirmed SearchProfile, approved readable sources, enough naturally relevant Opportunities, and valid entitlement;
-- matching thresholds are intentionally not tuned to guarantee a delivery;
-- synthetic evaluation fixtures are not production quality evidence;
-- source quality, Telegram availability, provider latency, and AI output quality require live verification;
-- paid subscription and provider operations remain deployment-specific;
-- V2 historical evidence is append-only/auditable, but the external Telegram send plus PostgreSQL state update cannot be exactly-once.
-
-## Development and tests
+## Tests and checks
 
 ```bash
 uv sync --locked
@@ -167,7 +140,11 @@ uv run --frozen python -m py_compile freelancer_bot/*.py freelancer_bot/persiste
 uv run --frozen alembic check
 ```
 
-PostgreSQL tests use `TEST_DATABASE_URL`; they are skipped or fail clearly when the database is unavailable. Tests use fakes for AI, Telegram, Web, and payment providers. Do not run a live collector or a provider-backed command in CI.
+PostgreSQL integration tests require `TEST_DATABASE_URL`; tests use fakes for Telegram and external providers. Do not run live collection or provider-backed commands as part of routine CI.
+
+## Known limitations
+
+This repository is an engineering baseline, not a hosted turnkey service or a production-quality guarantee. Live results depend on source availability and approval, account permissions, configuration, optional provider availability, and matching/entitlement rules. Telegram delivery and PostgreSQL state cannot be committed atomically, so external delivery is at-least-once across certain failure windows. Review [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) before deployment.
 
 ## License
 
